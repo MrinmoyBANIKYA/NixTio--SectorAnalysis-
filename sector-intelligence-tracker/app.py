@@ -12,6 +12,29 @@ import plotly.graph_objects as go
 import datetime
 import time
 
+# Monkey patch pandas DataFrameGroupBy.get_group to avoid compatibility KeyErrors with Plotly Express in Pandas 3.0+
+from pandas.core.groupby.generic import DataFrameGroupBy
+_original_get_group = DataFrameGroupBy.get_group
+
+def _patched_get_group(self, name, *args, **kwargs):
+    try:
+        return _original_get_group(self, name, *args, **kwargs)
+    except KeyError:
+        if not isinstance(name, tuple):
+            try:
+                return _original_get_group(self, (name,), *args, **kwargs)
+            except KeyError:
+                pass
+        elif isinstance(name, tuple) and len(name) == 1:
+            try:
+                return _original_get_group(self, name[0], *args, **kwargs)
+            except KeyError:
+                pass
+        raise
+
+DataFrameGroupBy.get_group = _patched_get_group
+
+
 from data.scrapers import (
     DataFetcher,
     SectorData
@@ -1041,7 +1064,7 @@ if True:
                         color="Valuation Tier", color_discrete_map=tier_colors,
                         orientation="h", text="Total Raised ($M)"
                     )
-                    fig_fund.update_traces(textposition="outside", textfont=dict(color="#FFF"), marker_cornerradius=8)
+                    fig_fund.update_traces(textposition="outside", textfont=dict(color="#FFF"))
                     apply_layout(fig_fund, 350)
                     apply_nixtio_theme(fig_fund)
                     st.plotly_chart(fig_fund, use_container_width=True)
@@ -1313,46 +1336,36 @@ Keep each paragraph to 3 sentences max. Start each with a bold headline.
                 "employer_health": "Employee Satisfaction Score"
             }
             
-            table_rows = ""
+
+            # Signal scorecard — rendered with native Streamlit so no raw HTML leaks
+            def _delta_html(delta):
+                if delta > 0:
+                    return f"<span style='color:#3FB950;font-weight:600;'>▲ {abs(delta):.1f}</span>"
+                elif delta < 0:
+                    return f"<span style='color:#F85149;font-weight:600;'>▼ {abs(delta):.1f}</span>"
+                else:
+                    return "<span style='color:#8B949E;font-weight:600;'>—</span>"
+
+            header_cols = st.columns([4, 2, 2, 2])
+            header_cols[0].markdown("<span style='font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;font-weight:600;'>Signal Name</span>", unsafe_allow_html=True)
+            header_cols[1].markdown("<span style='font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;font-weight:600;float:right;'>Score</span>", unsafe_allow_html=True)
+            header_cols[2].markdown("<span style='font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;font-weight:600;float:right;'>WoW</span>", unsafe_allow_html=True)
+            header_cols[3].markdown("<span style='font-size:11px;color:#8B949E;text-transform:uppercase;letter-spacing:.5px;font-weight:600;float:right;'>MoM</span>", unsafe_allow_html=True)
+            st.markdown("<hr style='margin:4px 0 8px 0;border-color:#30363D;'>", unsafe_allow_html=True)
+
             for metric_key, label in metrics_display.items():
                 cur_val = report["metrics"][metric_key]
-                wow = report["signal_deltas"][metric_key]["wow"]
-                mom = report["signal_deltas"][metric_key]["mom"]
-                
-                wow_color = "#3FB950" if wow > 0 else ("#F85149" if wow < 0 else "#8B949E")
-                wow_symbol = "▲" if wow > 0 else ("▼" if wow < 0 else "—")
-                wow_text = f"{wow_symbol} {abs(wow):.1f}" if wow != 0 else "—"
-                
-                mom_color = "#3FB950" if mom > 0 else ("#F85149" if mom < 0 else "#8B949E")
-                mom_symbol = "▲" if mom > 0 else ("▼" if mom < 0 else "—")
-                mom_text = f"{mom_symbol} {abs(mom):.1f}" if mom != 0 else "—"
-                
-                table_rows += f"""
-                <tr style="border-bottom: 1px solid #21262D;">
-                    <td style="padding: 12px 6px; font-weight:600; color:white; font-size:13px;">{label}</td>
-                    <td style="padding: 12px 6px; text-align:right; font-weight:700; color:#378ADD; font-size:14px;">{cur_val:.1f} / 10</td>
-                    <td style="padding: 12px 6px; text-align:right; font-weight:600; color:{wow_color}; font-size:13px;">{wow_text}</td>
-                    <td style="padding: 12px 6px; text-align:right; font-weight:600; color:{mom_color}; font-size:13px;">{mom_text}</td>
-                </tr>
-                """
-                
-            table_html = f"""
-            <table style="width:100%; border-collapse:collapse; font-family:Inter, sans-serif;">
-                <thead>
-                    <tr style="border-bottom: 2px solid #30363D; color:#8B949E; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">
-                        <th style="padding: 8px 6px; text-align:left;">Signal Name</th>
-                        <th style="padding: 8px 6px; text-align:right;">Latest Score</th>
-                        <th style="padding: 8px 6px; text-align:right;">WoW Delta</th>
-                        <th style="padding: 8px 6px; text-align:right;">MoM Delta</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {table_rows}
-                </tbody>
-            </table>
-            """
-            st.markdown(table_html, unsafe_allow_html=True)
-            st.caption("All signals are mathematically normalized to a standardized 0-10 scale (10 is maximum performance).")
+                wow     = report["signal_deltas"][metric_key]["wow"]
+                mom     = report["signal_deltas"][metric_key]["mom"]
+
+                row = st.columns([4, 2, 2, 2])
+                row[0].markdown(f"<span style='font-weight:600;color:white;font-size:13px;'>{label}</span>", unsafe_allow_html=True)
+                row[1].markdown(f"<div style='text-align:right;font-weight:700;color:#378ADD;font-size:14px;'>{cur_val:.1f}/10</div>", unsafe_allow_html=True)
+                row[2].markdown(f"<div style='text-align:right;'>{_delta_html(wow)}</div>", unsafe_allow_html=True)
+                row[3].markdown(f"<div style='text-align:right;'>{_delta_html(mom)}</div>", unsafe_allow_html=True)
+                st.markdown("<hr style='margin:4px 0;border-color:#21262D;'>", unsafe_allow_html=True)
+
+            st.caption("All signals are normalized to a 0–10 scale (10 = maximum performance).")
 
         # 4. Historical Backtest Chart
         st.markdown("<div style='height: 2.5rem'></div>", unsafe_allow_html=True)
@@ -1380,7 +1393,7 @@ Keep each paragraph to 3 sentences max. Start each with a bold headline.
                 if news_data and any(v > 0 for v in news_data.values()):
                     ndf = pd.DataFrame([{"Company": k, "Mentions": v} for k, v in news_data.items()]).sort_values("Mentions", ascending=True)
                     fig_news = px.bar(ndf, x="Mentions", y="Company", color="Company", color_discrete_sequence=get_color_seq(ndf, "Company", cmap), orientation="h", text="Mentions")
-                    fig_news.update_traces(textposition="outside", textfont=dict(color="#FFF"), marker_cornerradius=8)
+                    fig_news.update_traces(textposition="outside", textfont=dict(color="#FFF"))
                     apply_layout(fig_news, 400)
                     apply_nixtio_theme(fig_news)
                     fig_news.update_layout(showlegend=False)
@@ -1411,7 +1424,7 @@ Keep each paragraph to 3 sentences max. Start each with a bold headline.
                 if jobs_data and any(v > 0 for v in jobs_data.values()):
                     jdf = pd.DataFrame([{"Company": k, "Open Roles": v} for k, v in jobs_data.items()]).sort_values("Open Roles", ascending=False)
                     fig2 = px.bar(jdf, x="Company", y="Open Roles", color="Company", color_discrete_sequence=get_color_seq(jdf, "Company", cmap), text="Open Roles")
-                    fig2.update_traces(textposition="outside", textfont=dict(color="#FFF"), marker_cornerradius=8)
+                    fig2.update_traces(textposition="outside", textfont=dict(color="#FFF"))
                     apply_layout(fig2, 350)
                     apply_nixtio_theme(fig2)
                     fig2.update_layout(showlegend=False)
@@ -1425,7 +1438,7 @@ Keep each paragraph to 3 sentences max. Start each with a bold headline.
                     rdf = pd.DataFrame([{"Company": k, "Rating": v["rating"]} for k, v in ratings_data.items() if v["rating"] > 0])
                     if not rdf.empty:
                         fig1 = px.bar(rdf, x="Company", y="Rating", color="Company", color_discrete_sequence=get_color_seq(rdf, "Company", cmap), text="Rating")
-                        fig1.update_traces(textposition="outside", textfont=dict(color="#FFF"), width=0.5, marker_cornerradius=8)
+                        fig1.update_traces(textposition="outside", textfont=dict(color="#FFF"), width=0.5)
                         fig1.update_yaxes(range=[0, 5])
                         apply_layout(fig1, 350)
                         apply_nixtio_theme(fig1)
@@ -1456,7 +1469,7 @@ Keep each paragraph to 3 sentences max. Start each with a bold headline.
                                    orientation='h', barmode='stack', color_discrete_map=color_m)
                     apply_layout(fig_s, max(250, len(sentiment_data)*60))
                     apply_nixtio_theme(fig_s)
-                    fig_s.update_traces(marker_cornerradius=0)
+                    fig_s.update_traces()
                     # Show legend at the top
                     fig_s.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None))
                     st.plotly_chart(fig_s, use_container_width=True)
